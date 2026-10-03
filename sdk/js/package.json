@@ -1,0 +1,22 @@
+{
+  "name": "@flagpole/sdk",
+  "version": "0.1.0",
+  "description": "Flagpole's JavaScript SDK, with React bindings.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./react": "./src/react.tsx"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  }
+}

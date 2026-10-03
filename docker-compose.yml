@@ -1,0 +1,91 @@
+# Local infrastructure for Flagpole. `docker compose up -d` starts the
+# dependencies; the API and worker run with `make api` and `make worker`, or
+# in containers with `docker compose --profile app up -d`.
+name: flagpole
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: flagpole
+      POSTGRES_PASSWORD: flagpole
+      POSTGRES_DB: flagpole
+    ports: ["5432:5432"]
+    volumes: [postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flagpole"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.6
+    command:
+      - redpanda start
+      - --mode dev-container
+      - --smp 1
+      - --memory 512M
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports: ["19092:19092"]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.8.2
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports: ["8081:8080"]
+    depends_on:
+      redpanda: { condition: service_healthy }
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports: ["8025:8025", "1025:1025"]
+
+  # The app itself, with `docker compose --profile app up -d --build`.
+  # The web app is then on http://localhost:3000.
+  api:
+    profiles: [app]
+    build: ./api
+    environment: &app-env
+      DATABASE_URL: postgres://flagpole:flagpole@postgres:5432/flagpole?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BROKERS: redpanda:9092
+      SMTP_ADDR: mailpit:1025
+      PUBLIC_URL: http://localhost:3000
+    ports: ["8080:8080"]
+    depends_on: &app-deps
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      redpanda: { condition: service_healthy }
+
+  worker:
+    profiles: [app]
+    build: ./api
+    entrypoint: ["/usr/local/bin/worker"]
+    environment: *app-env
+    depends_on:
+      <<: *app-deps
+      api: { condition: service_started }
+
+  web:
+    profiles: [app]
+    build: ./web
+    ports: ["3000:80"]
+    depends_on: [api]
+
+volumes:
+  postgres:

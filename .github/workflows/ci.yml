@@ -1,0 +1,93 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    name: API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: api/go.mod
+          cache-dependency-path: api/go.sum
+      - name: Start Postgres, Redis and Redpanda
+        working-directory: .
+        run: docker compose up -d --wait postgres redis redpanda
+      - run: go vet ./...
+      - run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+      - run: staticcheck ./... && staticcheck -tests=false ./...
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+      - run: govulncheck ./...
+      # Unit tests and the end-to-end suite, against the real containers.
+      - run: go test -race ./...
+
+  stack:
+    name: Running stack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: api/go.mod
+          cache-dependency-path: api/go.sum
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Start Postgres, Redis, Redpanda and Mailpit
+        run: docker compose up -d --wait postgres redis redpanda mailpit
+      - name: Seed, then start the API and worker
+        working-directory: api
+        run: |
+          go build -o /tmp/flagpole-api ./cmd/api
+          go build -o /tmp/flagpole-worker ./cmd/worker
+          go run ./cmd/flagpole migrate up
+          go run ./cmd/flagpole seed -demo-env ../demo/.env.local > /dev/null
+          /tmp/flagpole-api > /tmp/api.log 2>&1 &
+          /tmp/flagpole-worker > /tmp/worker.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf localhost:8080/healthz && break; sleep 1; done
+      - name: Walk a reviewed change through the stack
+        run: scripts/prove.sh
+      - name: SDK tests against the stack
+        working-directory: sdk/js
+        run: FLAGPOLE_KEY=$(sed -n 's/^VITE_FLAGPOLE_KEY=//p' ../../demo/.env.local) npm test
+      - name: Logs
+        if: failure()
+        run: tail -n 100 /tmp/api.log /tmp/worker.log
+
+  web:
+    name: Web apps
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [web, demo]
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm audit --audit-level=low
